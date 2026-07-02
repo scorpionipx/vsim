@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(PYTHONPATH=. python3 /tmp/check1.py)",
+      "Bash(cp /tmp/check2.py /home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker/python_controller/_chk.py)",
+      "Bash(python3 _chk.py)",
+      "Bash(rm -f _chk.py)",
+      "Bash(cp /tmp/geo.py /home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker/python_controller/_g.py)",
+      "Bash(python3 _g.py)",
+      "Bash(rm -f _g.py)",
+      "Bash(python3 -)",
+      "Bash(cp /tmp/geo.py /home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker/python_controller/_g.py && python3 _g.py 2>&1; rm -f _g.py)",
+      "Bash(python3 -m config.compute_envelope)",
+      "Bash(echo \"exit=$?\")",
+      "Read(//home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker/**)",
+      "Bash(mkdir -p Doc)",
+      "Bash(cp /tmp/measure_guide.png Doc/parameter_measurement_guide.png)",
+      "Bash(cp /tmp/measure_guide.py python_controller/visualization/measurement_guide.py)",
+      "Bash(rm -f /tmp/q_*.png)",
+      "Bash(python3 -m examples.sim_to_platform --rate 20 --duration 1)",
+      "Bash(python3 _probe.py)",
+      "Bash(python3 -m examples.sim_to_platform --rate 50 --duration 2)",
+      "Bash(python3 _rate.py)",
+      "Bash(awk 'NR>=244 && NR<=285' python_controller/examples/sim_to_platform.py)",
+      "Bash(python3 -c \"import examples.sim_to_platform as m; print\\('imports OK; public:', [n for n in dir\\(m\\) if not n.startswith\\('_'\\) and n[0].isupper\\(\\)]\\)\")",
+      "Bash(git -C /home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker status --short)",
+      "Bash(python3 -m examples.minimal)"
+    ],
+    "additionalDirectories": [
+      "/tmp",
+      "/home/george/Desktop/Projects/StewartPlaform_ESP32_CarMaker"
+    ]
+  }
+}

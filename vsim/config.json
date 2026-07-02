@@ -1,0 +1,44 @@
+{
+  "target_host": "192.168.69.69",
+  "target_port": 6969,
+  "receiver_host": "192.168.69.68",
+  "receiver_port": 6868,
+  "interval_ms": 10,
+  "min_angle": 80,
+  "max_angle": 180,
+  "vorosim_port": 6767,
+  "remote_signals_mapping": {
+    "physics.pitch": "pitch",
+    "physics.localAngularVel[1]": "yaw",
+    "physics.localAngularVel[2]": "roll"
+  },
+  "axis_transforms": {
+    "pitch": {
+      "offset": "0",
+      "gain": "-2.1",
+      "min": "",
+      "max": ""
+    },
+    "roll": {
+      "offset": "0",
+      "gain": "0.3",
+      "min": "",
+      "max": ""
+    },
+    "yaw": {
+      "offset": "0",
+      "gain": "0.3",
+      "min": "",
+      "max": ""
+    }
+  },
+  "smoothing": {
+    "enabled": true,
+    "strength": 100
+  },
+  "master_motion": {
+    "park_angle": 80.0,
+    "neutral_angle": 130.0,
+    "move_speed_dps": 7.0
+  }
+}

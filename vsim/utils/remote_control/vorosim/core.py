@@ -22,10 +22,12 @@ Protocol from the Vorosim client (over the single UDP peer):
 Drop ``VorosimWidget`` into vsim/core.py's layout.
 """
 
+import math
 import socket
 import struct
+import time
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QEvent
 from PyQt6.QtGui import QIntValidator, QDoubleValidator
 from PyQt6.QtWidgets import (
     QGroupBox, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
@@ -175,21 +177,62 @@ class AxisTransformWidget(QGroupBox):
         for edit in (self.offset_edit, self.gain_edit, self.min_edit, self.max_edit):
             edit.editingFinished.connect(self.changed)
 
+        # Display-only tracker of the lowest/highest value actually set on this
+        # axis (after transforms/smoothing/limits). Double-click to reset.
+        self._set_min = None
+        self._set_max = None
+        self.set_range_label = QLabel("—")
+        self.set_range_label.setStyleSheet(
+            "font-family: Consolas, monospace; color: gray;"
+        )
+        self.set_range_label.setToolTip(
+            "Lowest / highest value set on this axis so far. "
+            "Double-click to reset."
+        )
+        self.set_range_label.installEventFilter(self)
+
         grid = QGridLayout()
         grid.setContentsMargins(6, 6, 6, 6)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(4)
-        for r, (label, edit) in enumerate((
+        for r, (label, widget) in enumerate((
             ("Offset", self.offset_edit),
             ("Gain", self.gain_edit),
             ("Min", self.min_edit),
             ("Max", self.max_edit),
+            ("Set", self.set_range_label),
         )):
             lbl = QLabel(label)
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             grid.addWidget(lbl, r, 0)
-            grid.addWidget(edit, r, 1)
+            grid.addWidget(widget, r, 1)
         self.setLayout(grid)
+
+    def eventFilter(self, obj, event):
+        if obj is self.set_range_label and event.type() == QEvent.Type.MouseButtonDblClick:
+            self.reset_set_range()
+            return True
+        return super().eventFilter(obj, event)
+
+    def record_set_value(self, value: float) -> None:
+        """Track the min/max of the values set on this axis and refresh the
+        display label when either peak moves."""
+        changed = False
+        if self._set_min is None or value < self._set_min:
+            self._set_min = value
+            changed = True
+        if self._set_max is None or value > self._set_max:
+            self._set_max = value
+            changed = True
+        if changed:
+            self.set_range_label.setText(
+                f"{self._set_min:+.2f} / {self._set_max:+.2f}"
+            )
+
+    def reset_set_range(self) -> None:
+        self._set_min = None
+        self._set_max = None
+        self.set_range_label.setText("—")
 
     @staticmethod
     def _num_field(default: str) -> QLineEdit:
@@ -247,6 +290,7 @@ class VorosimWidget(QGroupBox):
                  signals_mapping: dict = None, pose_callback=None,
                  ac_interval_ms: int = DEFAULT_AC_INTERVAL_MS,
                  axis_transforms: dict = None, smoothing: dict = None,
+                 rate_limit: dict = None,
                  save_settings_callback=None, parent=None):
         super().__init__("Vorosim Remote Control", parent)
         self.logger = logger
@@ -258,6 +302,7 @@ class VorosimWidget(QGroupBox):
         # config.json.
         self._axis_transforms = dict(axis_transforms or {})
         self._smoothing_init = dict(smoothing or {})
+        self._rate_limit_init = dict(rate_limit or {})
         self._save_settings_callback = save_settings_callback
 
         # Direct Assetto Corsa shared-memory reader (bypasses the UDP path).
@@ -276,11 +321,17 @@ class VorosimWidget(QGroupBox):
         self._smoothing_enabled = False
         self._filter_state: dict[str, float] = {}
 
+        # Rate limiting (speed / acceleration caps) of the per-axis angles,
+        # applied after smoothing. Per-role state holds the last commanded
+        # position, velocity and timestamp; cleared on toggle or reconnect.
+        self._rate_state: dict[str, dict] = {}
+
         root = QVBoxLayout()
         root.addLayout(self._build_controls(port))
         root.addLayout(self._build_ac_controls())
         root.addLayout(self._build_transforms())
         root.addLayout(self._build_smoothing())
+        root.addLayout(self._build_rate_limit())
         root.addWidget(self._build_console())
         self.setLayout(root)
 
@@ -396,6 +447,12 @@ class VorosimWidget(QGroupBox):
                 "enabled": self.smooth_toggle.isChecked(),
                 "strength": self.smooth_slider.value(),
             },
+            "rate_limit": {
+                "speed_enabled": self.speed_limit_toggle.isChecked(),
+                "max_speed_dps": self.max_speed_edit.text().strip(),
+                "accel_enabled": self.accel_limit_toggle.isChecked(),
+                "max_accel_dps2": self.max_accel_edit.text().strip(),
+            },
         }
         try:
             self._save_settings_callback(settings)
@@ -439,6 +496,58 @@ class VorosimWidget(QGroupBox):
 
         row.addStretch(1)
         self._update_smooth_label()
+        return row
+
+    def _build_rate_limit(self):
+        """Toggles + fields for the per-axis speed and acceleration caps applied
+        to the output angles (after smoothing).
+
+        Initial state is loaded from the persisted ``rate_limit`` config;
+        changes are written back via ``save_settings_callback``."""
+        init = self._rate_limit_init
+
+        def _num_field(value) -> QLineEdit:
+            edit = QLineEdit(str(value))
+            validator = QDoubleValidator(0.0, 100000.0, 2)
+            validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+            edit.setValidator(validator)
+            edit.setMaximumWidth(70)
+            edit.editingFinished.connect(self._persist_settings)
+            return edit
+
+        row = QHBoxLayout()
+
+        self.speed_limit_toggle = QCheckBox("Limit speed")
+        self.speed_limit_toggle.setChecked(bool(init.get("speed_enabled", False)))
+        self.speed_limit_toggle.setToolTip(
+            "Cap how fast each output angle may change (°/s). Normal motion "
+            "passes through; only spikes get slowed down."
+        )
+        self.speed_limit_toggle.stateChanged.connect(self._on_rate_limit_toggle)
+        self.speed_limit_toggle.stateChanged.connect(self._persist_settings)
+        row.addWidget(self.speed_limit_toggle)
+
+        row.addWidget(QLabel("Max speed (°/s):"))
+        self.max_speed_edit = _num_field(init.get("max_speed_dps", 60))
+        row.addWidget(self.max_speed_edit)
+
+        row.addSpacing(16)
+
+        self.accel_limit_toggle = QCheckBox("Limit accel")
+        self.accel_limit_toggle.setChecked(bool(init.get("accel_enabled", False)))
+        self.accel_limit_toggle.setToolTip(
+            "Cap how fast each output angle's speed may change (°/s²). Softens "
+            "jerk: the platform ramps up and brakes instead of snapping."
+        )
+        self.accel_limit_toggle.stateChanged.connect(self._on_rate_limit_toggle)
+        self.accel_limit_toggle.stateChanged.connect(self._persist_settings)
+        row.addWidget(self.accel_limit_toggle)
+
+        row.addWidget(QLabel("Max accel (°/s²):"))
+        self.max_accel_edit = _num_field(init.get("max_accel_dps2", 200))
+        row.addWidget(self.max_accel_edit)
+
+        row.addStretch(1)
         return row
 
     def _build_console(self):
@@ -602,6 +711,56 @@ class VorosimWidget(QGroupBox):
         self._filter_state[role] = filtered
         return filtered
 
+    # ---------- rate limiting (speed / acceleration caps) ----------
+    def _on_rate_limit_toggle(self, _state):
+        # start clean so re-enabling doesn't chase a stale position
+        self._rate_state.clear()
+
+    @staticmethod
+    def _limit_value(edit: QLineEdit) -> float:
+        """Parse a limit field. Blank or non-positive means "no limit" (inf)."""
+        try:
+            v = float(edit.text().strip().replace(",", "."))
+        except ValueError:
+            return math.inf
+        return v if v > 0 else math.inf
+
+    def _rate_limit(self, role: str, target: float) -> float:
+        """Move the commanded angle toward *target* no faster than the enabled
+        speed (°/s) and acceleration (°/s²) caps allow. dt comes from wall time
+        between packets, clamped so a stream pause can't let a jump through."""
+        speed_on = self.speed_limit_toggle.isChecked()
+        accel_on = self.accel_limit_toggle.isChecked()
+        if not speed_on and not accel_on:
+            return target
+
+        now = time.monotonic()
+        st = self._rate_state.get(role)
+        if st is None:
+            self._rate_state[role] = {"pos": target, "vel": 0.0, "t": now}
+            return target
+        dt = min(max(now - st["t"], 1e-3), 0.1)
+        st["t"] = now
+
+        err = target - st["pos"]
+        vel = err / dt  # velocity that would reach the target this tick
+        if accel_on:
+            a_max = self._limit_value(self.max_accel_edit)
+            if math.isfinite(a_max):
+                # never faster than what can still brake to a stop at target
+                brake = math.sqrt(2.0 * a_max * abs(err))
+                vel = max(-brake, min(brake, vel))
+                # velocity may only change by a_max*dt per tick
+                dv = a_max * dt
+                vel = max(st["vel"] - dv, min(st["vel"] + dv, vel))
+        if speed_on:
+            v_max = self._limit_value(self.max_speed_edit)
+            vel = max(-v_max, min(v_max, vel))
+
+        st["vel"] = vel
+        st["pos"] += vel * dt
+        return st["pos"]
+
     # ---------- incoming data handling ----------
     def _on_datagram(self, data: bytes):
         """Route an incoming datagram: handshake / signal-list (text) update the
@@ -610,6 +769,7 @@ class VorosimWidget(QGroupBox):
             # (re)connection handshake — the signal order will be re-announced
             self._signal_order = []
             self._filter_state.clear()
+            self._rate_state.clear()
             return
         if data.startswith(b"Signals:"):
             try:
@@ -668,7 +828,12 @@ class VorosimWidget(QGroupBox):
             raw = named[sig_name]
             tr = self._transforms.get(role)
             angle = tr.transform(raw) if tr else raw
-            roles[role] = self._smooth(role, angle) if self._smoothing_enabled else angle
+            if self._smoothing_enabled:
+                angle = self._smooth(role, angle)
+            angle = self._rate_limit(role, angle)
+            roles[role] = angle
+            if tr:
+                tr.record_set_value(angle)
         if roles:
             self._pose_callback(roles)
 

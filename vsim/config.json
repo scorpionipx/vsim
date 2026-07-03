@@ -36,6 +36,12 @@
     "enabled": true,
     "strength": 100
   },
+  "rate_limit": {
+    "speed_enabled": false,
+    "max_speed_dps": "60",
+    "accel_enabled": true,
+    "max_accel_dps2": "10"
+  },
   "master_motion": {
     "park_angle": 80.0,
     "neutral_angle": 130.0,

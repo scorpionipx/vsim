@@ -190,6 +190,7 @@ class MainWindow(QWidget):
             ac_interval_ms=self.config.get("interval_ms", 10),
             axis_transforms=self.config.get("axis_transforms", {}),
             smoothing=self.config.get("smoothing", {}),
+            rate_limit=self.config.get("rate_limit", {}),
             save_settings_callback=self._save_vorosim_settings,
         )
         root.addWidget(self.vorosim_widget, stretch=2)
@@ -693,12 +694,14 @@ class MainWindow(QWidget):
             self.logger.exception(f"Failed to save config.json: {e}")
 
     def _save_vorosim_settings(self, settings: dict) -> None:
-        """Persist the Vorosim Pitch/Roll/Yaw transforms and smoothing (filter)
-        settings to config.json."""
+        """Persist the Vorosim Pitch/Roll/Yaw transforms, smoothing (filter)
+        and rate-limit settings to config.json."""
         if "axis_transforms" in settings:
             self.config["axis_transforms"] = settings["axis_transforms"]
         if "smoothing" in settings:
             self.config["smoothing"] = settings["smoothing"]
+        if "rate_limit" in settings:
+            self.config["rate_limit"] = settings["rate_limit"]
         self.save_config()
         self.logger.info("Saved Vorosim settings to config.json.")
 

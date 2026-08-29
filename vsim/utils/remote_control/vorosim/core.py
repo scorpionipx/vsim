@@ -35,6 +35,11 @@ from PyQt6.QtWidgets import (
 )
 
 from vsim.utils.assetto_corsa import AssettoCorsaReaderThread
+from vsim.utils.forza import (
+    DEFAULT_FORZA_PORT,
+    ForzaHorizonReaderThread,
+    owns_path as _is_forza_path,
+)
 
 
 DEFAULT_VOROSIM_PORT = 6767
@@ -290,7 +295,7 @@ class VorosimWidget(QGroupBox):
                  signals_mapping: dict = None, pose_callback=None,
                  ac_interval_ms: int = DEFAULT_AC_INTERVAL_MS,
                  axis_transforms: dict = None, smoothing: dict = None,
-                 rate_limit: dict = None,
+                 rate_limit: dict = None, forza_port: int = DEFAULT_FORZA_PORT,
                  save_settings_callback=None, parent=None):
         super().__init__("Vorosim Remote Control", parent)
         self.logger = logger
@@ -308,6 +313,12 @@ class VorosimWidget(QGroupBox):
         # Direct Assetto Corsa shared-memory reader (bypasses the UDP path).
         self._ac_reader = None
         self._ac_interval_ms = max(1, int(ac_interval_ms))
+
+        # Forza Horizon 5 "Data Out" reader. FH5 pushes UDP telemetry rather
+        # than exposing shared memory, so this one listens instead of polling;
+        # everything downstream of the {path: value} dict is shared with AC.
+        self._forza_reader = None
+        self._forza_port = int(forza_port)
 
         # Motor control: maps incoming signal name -> role (e.g. pitch/yaw/roll).
         # pose_callback(roles: dict) applies the roles to the platform/motors.
@@ -327,8 +338,7 @@ class VorosimWidget(QGroupBox):
         self._rate_state: dict[str, dict] = {}
 
         root = QVBoxLayout()
-        root.addLayout(self._build_controls(port))
-        root.addLayout(self._build_ac_controls())
+        root.addLayout(self._build_sources(port))
         root.addLayout(self._build_transforms())
         root.addLayout(self._build_smoothing())
         root.addLayout(self._build_rate_limit())
@@ -336,7 +346,43 @@ class VorosimWidget(QGroupBox):
         self.setLayout(root)
 
     # ---------- UI builders ----------
+    def _build_sources(self, port: int):
+        """Telemetry sources: one row holding the three source buttons, and one
+        row holding their details (ports, addresses, per-source status).
+
+        The three sources are independent and may run at once; which one drives
+        the rig is decided by ``remote_signals_mapping``, not by these buttons.
+        Each ``_build_*_controls`` helper creates its own button but leaves
+        placing it to this method, so the buttons line up side by side while
+        their details stay grouped underneath.
+        """
+        col = QVBoxLayout()
+
+        details = [
+            self._build_controls(port),    # creates udp_toggle_btn
+            self._build_ac_controls(),     # creates ac_start_btn
+            self._build_forza_controls(),  # creates forza_start_btn
+        ]
+
+        buttons = QHBoxLayout()
+        for btn in (self.udp_toggle_btn, self.ac_start_btn, self.forza_start_btn):
+            buttons.addWidget(btn)
+        buttons.addStretch(1)
+        col.addLayout(buttons)
+
+        detail_row = QHBoxLayout()
+        for i, row in enumerate(details):
+            if i:
+                detail_row.addSpacing(16)
+            detail_row.addLayout(row)
+        detail_row.addStretch(1)
+        col.addLayout(detail_row)
+
+        return col
+
     def _build_controls(self, port: int):
+        """Legacy Vorosim UDP client controls. Returns the detail row; the
+        toggle button itself is placed by _build_sources."""
         row = QHBoxLayout()
 
         # The legacy UDP remote (Vorosim client over the network) is hidden by
@@ -345,7 +391,6 @@ class VorosimWidget(QGroupBox):
         self.udp_toggle_btn = QPushButton("Enable remote via UDP")
         self.udp_toggle_btn.setCheckable(True)
         self.udp_toggle_btn.toggled.connect(self._on_udp_toggle)
-        row.addWidget(self.udp_toggle_btn)
 
         port_label = QLabel("Port:")
         row.addWidget(port_label)
@@ -354,32 +399,29 @@ class VorosimWidget(QGroupBox):
         self.port_edit.setMaximumWidth(80)
         row.addWidget(self.port_edit)
 
-        ip_title = QLabel("IP Address:")
-        row.addWidget(ip_title)
-        self.ip_label = QLabel(get_local_ip())
-        self.ip_label.setStyleSheet("font-family: Consolas, monospace; font-weight: bold;")
-        self.ip_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        row.addWidget(self.ip_label)
-
         self.start_btn = QPushButton("Start Listener")
         self.start_btn.clicked.connect(self._toggle_listener)
         row.addWidget(self.start_btn)
 
-        status_title = QLabel("Status:")
+        # Named rather than a bare "Status:" because all three sources now show
+        # their status side by side in the same row.
+        status_title = QLabel("Vorosim:")
         row.addWidget(status_title)
         self.status_label = QLabel("Idle")
         self.status_label.setStyleSheet("font-weight: bold;")
         row.addWidget(self.status_label)
 
-        # widgets toggled by "Enable remote via UDP" — hidden until enabled
+        # widgets toggled by "Enable remote via UDP" — hidden until enabled.
+        # The machine's IP is deliberately NOT in here: both inbound sources
+        # need it (it is what you type into the sending end), so it lives in
+        # the always-visible part of the row instead.
         self._udp_widgets = [
-            port_label, self.port_edit, ip_title, self.ip_label,
+            port_label, self.port_edit,
             self.start_btn, status_title, self.status_label,
         ]
         for w in self._udp_widgets:
             w.setVisible(False)
 
-        row.addStretch(1)
         return row
 
     def _on_udp_toggle(self, checked: bool):
@@ -397,7 +439,10 @@ class VorosimWidget(QGroupBox):
     def _build_ac_controls(self):
         """Controls for reading Assetto Corsa shared memory directly, with no
         UDP hop. Reuses the same mapping / transforms / smoothing as the UDP
-        path; only the source of the signal values differs."""
+        path; only the source of the signal values differs.
+
+        Returns the detail row; the button itself is placed by _build_sources.
+        """
         row = QHBoxLayout()
 
         self.ac_start_btn = QPushButton("Read Assetto Corsa (direct)")
@@ -407,14 +452,59 @@ class VorosimWidget(QGroupBox):
             "running on this machine."
         )
         self.ac_start_btn.clicked.connect(self._toggle_ac_reader)
-        row.addWidget(self.ac_start_btn)
 
-        row.addWidget(QLabel("Status:"))
+        row.addWidget(QLabel("Assetto Corsa:"))
         self.ac_status_label = QLabel("Idle")
         self.ac_status_label.setStyleSheet("font-weight: bold;")
         row.addWidget(self.ac_status_label)
 
-        row.addStretch(1)
+        return row
+
+    def _build_forza_controls(self):
+        """Controls for the Forza Horizon 5 Data Out telemetry stream.
+
+        FH5 pushes UDP packets at us (Settings -> HUD & Gameplay -> Data Out),
+        so unlike Assetto Corsa there is a port to bind. Reuses the same
+        mapping / transforms / smoothing as every other source; only where the
+        signal values come from differs.
+
+        Returns the detail row; the button itself is placed by _build_sources.
+        """
+        row = QHBoxLayout()
+
+        self.forza_start_btn = QPushButton("Read Forza Horizon 5 (Data Out)")
+        self.forza_start_btn.setToolTip(
+            "Listen for FH5's Data Out telemetry. In the game: Settings -> "
+            "HUD & Gameplay -> Data Out = On, IP = the address shown here, "
+            "Port = the port set here."
+        )
+        self.forza_start_btn.clicked.connect(self._toggle_forza_reader)
+
+        # This machine's address, always visible: it is what gets typed into
+        # the sending end (FH5's Data Out screen, or the Vorosim client), so it
+        # must not be hidden behind the UDP section's toggle.
+        row.addWidget(QLabel("This PC:"))
+        self.ip_label = QLabel(get_local_ip())
+        self.ip_label.setStyleSheet("font-family: Consolas, monospace; font-weight: bold;")
+        self.ip_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.ip_label.setToolTip(
+            "This machine's IP address on the local network. Enter it as the "
+            "destination in Forza's Data Out screen (or in the Vorosim client)."
+        )
+        row.addWidget(self.ip_label)
+
+        row.addSpacing(12)
+        row.addWidget(QLabel("Forza port:"))
+        self.forza_port_edit = QLineEdit(str(self._forza_port))
+        self.forza_port_edit.setValidator(QIntValidator(1, 65535, self))
+        self.forza_port_edit.setMaximumWidth(80)
+        self.forza_port_edit.editingFinished.connect(self._persist_settings)
+        row.addWidget(self.forza_port_edit)
+
+        self.forza_status_label = QLabel("Idle")
+        self.forza_status_label.setStyleSheet("font-weight: bold;")
+        row.addWidget(self.forza_status_label)
+
         return row
 
     def _build_transforms(self):
@@ -453,6 +543,7 @@ class VorosimWidget(QGroupBox):
                 "accel_enabled": self.accel_limit_toggle.isChecked(),
                 "max_accel_dps2": self.max_accel_edit.text().strip(),
             },
+            "forza_port": self.forza_port(),
         }
         try:
             self._save_settings_callback(settings)
@@ -634,18 +725,22 @@ class VorosimWidget(QGroupBox):
     def start_ac_reader(self):
         if self._ac_reader and self._ac_reader.isRunning():
             return
-        if not self._mapping:
-            self._set_ac_status("No remote_signals_mapping configured")
+        # The mapping keys are the dotted shared-memory paths to sample. A
+        # mapping may also hold fh5.* paths for the Forza reader; those name no
+        # AC section, so filter them out here rather than handing the reader
+        # paths it can never resolve.
+        paths = [p for p in self._mapping if not _is_forza_path(p)]
+        if not paths:
+            self._set_ac_status("No Assetto Corsa signals in remote_signals_mapping")
             if self.logger:
                 self.logger.warning(
-                    "Assetto Corsa reader: remote_signals_mapping is empty; "
-                    "nothing to read."
+                    "Assetto Corsa reader: remote_signals_mapping has no "
+                    "Assetto Corsa paths; nothing to read."
                 )
             return
 
-        # the mapping keys are the dotted shared-memory paths to sample
         self._ac_reader = AssettoCorsaReaderThread(
-            list(self._mapping.keys()), self._ac_interval_ms, self.logger
+            paths, self._ac_interval_ms, self.logger
         )
         self._ac_reader.signals_updated.connect(self.apply_named_signals)
         self._ac_reader.status_changed.connect(self._set_ac_status)
@@ -670,6 +765,66 @@ class VorosimWidget(QGroupBox):
     def _append_ac_preview(self, text: str):
         if self._logging_enabled:
             self.console.append(f"[AC] {text}")
+
+    # ---------- Forza Horizon 5 Data Out reader ----------
+    def forza_port(self) -> int:
+        try:
+            return int(self.forza_port_edit.text())
+        except (TypeError, ValueError):
+            return DEFAULT_FORZA_PORT
+
+    def _toggle_forza_reader(self):
+        if self._forza_reader and self._forza_reader.isRunning():
+            self.stop_forza_reader()
+        else:
+            self.start_forza_reader()
+
+    def start_forza_reader(self):
+        if self._forza_reader and self._forza_reader.isRunning():
+            return
+
+        # Only the fh5.* entries of the mapping concern this reader; the rest
+        # belong to Assetto Corsa. An empty list would mean "emit everything",
+        # so an all-AC mapping is refused here rather than silently streaming
+        # 85 unused signals.
+        paths = [p for p in self._mapping if _is_forza_path(p)]
+        if not paths:
+            self._set_forza_status("No fh5.* signals in remote_signals_mapping")
+            if self.logger:
+                self.logger.warning(
+                    "Forza Horizon reader: remote_signals_mapping has no "
+                    "'fh5.*' entries; nothing to read."
+                )
+            return
+
+        self._forza_reader = ForzaHorizonReaderThread(
+            paths, self.forza_port(), logger=self.logger
+        )
+        self._forza_reader.signals_updated.connect(self.apply_named_signals)
+        self._forza_reader.status_changed.connect(self._set_forza_status)
+        self._forza_reader.preview.connect(self._append_forza_preview)
+        self._forza_reader.finished.connect(self._on_forza_reader_finished)
+        self._forza_reader.start()
+
+        self.forza_start_btn.setText("Stop Forza Horizon 5")
+        self.forza_port_edit.setEnabled(False)
+
+    def stop_forza_reader(self):
+        if self._forza_reader and self._forza_reader.isRunning():
+            self._forza_reader.stop()
+            self._forza_reader.wait(2000)
+
+    def _on_forza_reader_finished(self):
+        self.forza_start_btn.setText("Read Forza Horizon 5 (Data Out)")
+        self.forza_port_edit.setEnabled(True)
+        self._forza_reader = None
+
+    def _set_forza_status(self, text: str):
+        self.forza_status_label.setText(text)
+
+    def _append_forza_preview(self, text: str):
+        if self._logging_enabled:
+            self.console.append(f"[FH5] {text}")
 
     # ---------- slots ----------
     def _set_status(self, text: str):
@@ -840,4 +995,5 @@ class VorosimWidget(QGroupBox):
     def closeEvent(self, e):
         self.stop_listener()
         self.stop_ac_reader()
+        self.stop_forza_reader()
         super().closeEvent(e)

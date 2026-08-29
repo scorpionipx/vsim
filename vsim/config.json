@@ -7,10 +7,14 @@
   "min_angle": 80,
   "max_angle": 180,
   "vorosim_port": 6767,
+  "forza_port": 5300,
   "remote_signals_mapping": {
     "physics.pitch": "pitch",
     "physics.localAngularVel[1]": "yaw",
-    "physics.localAngularVel[2]": "roll"
+    "physics.localAngularVel[2]": "roll",
+    "fh5.Pitch": "pitch",
+    "fh5.AngularVelocityY": "yaw",
+    "fh5.AngularVelocityZ": "roll"
   },
   "axis_transforms": {
     "pitch": {
@@ -34,7 +38,7 @@
   },
   "smoothing": {
     "enabled": true,
-    "strength": 97
+    "strength": 94
   },
   "rate_limit": {
     "speed_enabled": false,

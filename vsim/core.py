@@ -36,6 +36,7 @@ from vsim.utils.remote_control.vorosim.core import (
     VorosimWidget,
     DEFAULT_VOROSIM_PORT,
 )
+from vsim.utils.forza import DEFAULT_FORZA_PORT
 
 from vsim.version import __version__
 from PyQt6.QtCore import QObject, QThread, QTimer, QMetaObject, pyqtSignal, pyqtSlot
@@ -191,6 +192,7 @@ class MainWindow(QWidget):
             axis_transforms=self.config.get("axis_transforms", {}),
             smoothing=self.config.get("smoothing", {}),
             rate_limit=self.config.get("rate_limit", {}),
+            forza_port=self.config.get("forza_port", DEFAULT_FORZA_PORT),
             save_settings_callback=self._save_vorosim_settings,
         )
         root.addWidget(self.vorosim_widget, stretch=2)
@@ -702,6 +704,8 @@ class MainWindow(QWidget):
             self.config["smoothing"] = settings["smoothing"]
         if "rate_limit" in settings:
             self.config["rate_limit"] = settings["rate_limit"]
+        if "forza_port" in settings:
+            self.config["forza_port"] = settings["forza_port"]
         self.save_config()
         self.logger.info("Saved Vorosim settings to config.json.")
 
@@ -873,6 +877,7 @@ class MainWindow(QWidget):
         self.stop_receiver()
         self.vorosim_widget.stop_listener()
         self.vorosim_widget.stop_ac_reader()
+        self.vorosim_widget.stop_forza_reader()
         super().closeEvent(e)
 
 

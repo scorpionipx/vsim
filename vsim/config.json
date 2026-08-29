@@ -15,7 +15,7 @@
   "axis_transforms": {
     "pitch": {
       "offset": "0",
-      "gain": "-2.1",
+      "gain": "-2",
       "min": "",
       "max": ""
     },
@@ -34,7 +34,7 @@
   },
   "smoothing": {
     "enabled": true,
-    "strength": 100
+    "strength": 97
   },
   "rate_limit": {
     "speed_enabled": false,

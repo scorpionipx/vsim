@@ -53,7 +53,7 @@ class ForzaHorizonReaderThread(QThread):
     preview = pyqtSignal(str)            # throttled text for the console
 
     def __init__(self, signal_paths, port: int = DEFAULT_FORZA_PORT,
-                 bind_host: str = "0.0.0.0", logger=None):
+                 bind_host: str = "127.0.0.1", logger=None):
         super().__init__()
         # Empty means "emit everything"; the widget passes the fh5.* paths its
         # mapping actually references.

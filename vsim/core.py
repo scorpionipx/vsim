@@ -32,6 +32,7 @@ from vsim.utils.udp.sender import (
 from vsim.utils.udp.receiver import UdpReceiverThread
 from vsim.utils.widgets.motor_widget import MotorWidget
 from vsim.utils.widgets.calibration_widget import CalibrationWidget
+from vsim.utils.widgets.plotter_widget import PlotterWidget
 from vsim.utils.remote_control.vorosim.core import (
     VorosimWidget,
     DEFAULT_VOROSIM_PORT,
@@ -193,9 +194,19 @@ class MainWindow(QWidget):
             smoothing=self.config.get("smoothing", {}),
             rate_limit=self.config.get("rate_limit", {}),
             forza_port=self.config.get("forza_port", DEFAULT_FORZA_PORT),
+            forza_bind_ip=self.config.get("forza_bind_ip", "0.0.0.0"),
             save_settings_callback=self._save_vorosim_settings,
         )
-        root.addWidget(self.vorosim_widget, stretch=2)
+
+        # Plotter panel: rolling chart of every signal the Vorosim widget
+        # receives, from any of its sources. Sits to the right of it.
+        self.plotter_widget = PlotterWidget(logger=self.logger)
+        self.vorosim_widget.signals_received.connect(self.plotter_widget.on_signals)
+
+        vorosim_row = QHBoxLayout()
+        vorosim_row.addWidget(self.vorosim_widget, stretch=2)
+        vorosim_row.addWidget(self.plotter_widget, stretch=2)
+        root.addLayout(vorosim_row, stretch=2)
 
         # Consoles
         root.addLayout(self._build_consoles(), stretch=3)
@@ -706,6 +717,8 @@ class MainWindow(QWidget):
             self.config["rate_limit"] = settings["rate_limit"]
         if "forza_port" in settings:
             self.config["forza_port"] = settings["forza_port"]
+        if "forza_bind_ip" in settings:
+            self.config["forza_bind_ip"] = settings["forza_bind_ip"]
         self.save_config()
         self.logger.info("Saved Vorosim settings to config.json.")
 

@@ -8,6 +8,7 @@
   "max_angle": 180,
   "vorosim_port": 6767,
   "forza_port": 5300,
+  "forza_bind_ip": "0.0.0.0",
   "remote_signals_mapping": {
     "physics.pitch": "pitch",
     "physics.localAngularVel[1]": "yaw",
@@ -19,7 +20,7 @@
   "axis_transforms": {
     "pitch": {
       "offset": "0",
-      "gain": "-2",
+      "gain": "-1.9",
       "min": "",
       "max": ""
     },
@@ -38,7 +39,7 @@
   },
   "smoothing": {
     "enabled": true,
-    "strength": 94
+    "strength": 100
   },
   "rate_limit": {
     "speed_enabled": false,
